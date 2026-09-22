@@ -328,4 +328,51 @@ function M.format_ask_result(content, ctx)
   return body .. footer
 end
 
+---User message content for a follow-up turn (history already in messages).
+---@param question string
+---@return string
+function M.follow_user_message(question)
+  return "追问:\n" .. vim.trim(question or "")
+end
+
+---Append one follow-up Q&A block to the display transcript.
+---@param transcript string
+---@param question string
+---@param answer string|nil
+---@param width integer|nil popup/content width for the separator
+---@return string
+function M.append_follow_turn(transcript, question, answer, width)
+  transcript = vim.trim(transcript or "")
+  question = vim.trim(question or "")
+  answer = vim.trim(answer or "")
+
+  -- Fence longer than any run of backticks in the question so nested ``` won't break.
+  local ticks = 3
+  for run in question:gmatch("`+") do
+    ticks = math.max(ticks, #run + 1)
+  end
+  local fence = string.rep("`", ticks)
+
+  local quoted = { "> " .. fence }
+  for _, line in ipairs(vim.split(question, "\n", { plain = true })) do
+    table.insert(quoted, "> " .. line)
+  end
+  table.insert(quoted, "> " .. fence)
+
+  local block = table.concat(quoted, "\n")
+  if answer ~= "" then
+    block = block .. "\n\n" .. answer
+  end
+
+  if transcript == "" then
+    return block
+  end
+
+  local sep_w = width
+  if not sep_w or sep_w < 3 then
+    sep_w = math.max(max_line_width(transcript), max_line_width(block), 40)
+  end
+  return transcript .. "\n\n" .. M.translate_separator(sep_w) .. "\n\n" .. block
+end
+
 return M

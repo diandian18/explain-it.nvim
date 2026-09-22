@@ -8,9 +8,9 @@ Neovim 插件：借助 OpenAI 兼容大模型 API，对光标处单词或可视�
 
 | 功能 | 默认快捷键 | 命令 | 说明 |
 |------|------------|------|------|
-| 解释 | `<leader>ee` | `:Explain` | 结合上下文 / LSP / 定义处注释，中文说明变量或选区 |
+| 解释 | `<leader>ee` | `:Explain` | 先显示 `# 目标`，再流式中文解释；底部 Ask 可多轮追问 |
 | 翻译 | `<leader>et` | `:ExplainTranslate` | 翻译光标单词或选中文本 |
-| 提问 | `<leader>ea` | `:ExplainAsk` | 弹出输入框提问，结合目标文本与上下文作答 |
+| 提问 | `<leader>ea` | `:ExplainAsk` | 同款浮窗，只显示 `# 目标` 并聚焦 Ask，直接提问（新会话） |
 | 重开 | `<leader>er` | `:ExplainLast` | 重新打开上次关闭的结果浮窗 |
 
 普通模式与可视模式均可用；有选区时优先使用选区。
@@ -87,6 +87,7 @@ require("explain_it").setup({
     translate = "<leader>et",
     ask = "<leader>ea",
     reopen = "<leader>er", -- 重新打开上次结果
+    follow_float = "i", -- 结果浮窗内容区聚焦底部 Ask；设为 false 可禁用
     -- 设为 false 可禁用某一快捷键
   },
 })
@@ -114,8 +115,12 @@ require("explain_it").setup({
 ## 快捷键与浮窗
 
 - 结果浮窗：`q` / `<Esc>` 关闭
-- 关闭后可用 `<leader>er` 或 `:ExplainLast` 重新打开上次内容（若浮窗仍在则聚焦）
-- 提问输入框：回车提交，`<Esc>` 取消
+- `<leader>ee`：回答区先出现 `# 目标`，再显示 `Explaining...` 并流式出解释
+- `<leader>ea`：同款浮窗，只显示 `# 目标`，自动聚焦底部 Ask（新会话，不沿用上次 ee）
+- 解释 / 提问浮窗底部有 **Ask** 输入区（固定 2 行，可换行滚动）：内容区按 `i` 聚焦；`C-s` 或普通模式回车发送；插入模式回车换行
+- Ask 区始终显示滚动条（不受 `ui.scrollbar` 影响）；回答区滚动条仍跟随该配置
+- `<Esc>` 在输入区：回到内容区；在内容区：关闭浮窗
+- 关闭后光标回到打开浮窗前的源窗口；可用 `<leader>er` / `:ExplainLast` 重开后再按 `i` 继续追问
 
 ## License
 

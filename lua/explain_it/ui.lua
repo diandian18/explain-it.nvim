@@ -1,5 +1,5 @@
 local Popup = require("nui.popup")
-local Input = require("nui.input")
+local Layout = require("nui.layout")
 local event = require("nui.utils.autocmd").event
 
 local config = require("explain_it.config")
@@ -8,6 +8,16 @@ local M = {}
 
 ---@type NuiPopup|nil
 local active_popup = nil
+
+---@type NuiLayout|nil
+local active_layout = nil
+
+---@type table|nil result handle (update / close / focus_*)
+local active_handle = nil
+
+local FOLLOW_INPUT_LINES = 2
+-- nui box size ≈ text lines + top/bottom border
+local FOLLOW_INPUT_HEIGHT = FOLLOW_INPUT_LINES + 2
 
 ---@type {
 ---  title: string,
@@ -174,9 +184,16 @@ local function setup_markdown_buffer(bufnr, winid)
     return
   end
 
+  local ft = result_filetype()
   pcall(function()
-    vim.bo[bufnr].filetype = result_filetype()
+    vim.bo[bufnr].filetype = ft
   end)
+
+  -- scrollbar=false uses filetype explain_it; map it so treesitter / render-markdown
+  -- still treat the buffer as markdown (otherwise fenced ``` stays visible).
+  if ft == RESULT_FT_NO_SCROLLBAR then
+    pcall(vim.treesitter.language.register, "markdown", RESULT_FT_NO_SCROLLBAR)
+  end
 
   if not scrollbar_enabled() then
     clear_scrollbar(bufnr)
@@ -204,13 +221,39 @@ local function setup_markdown_buffer(bufnr, winid)
     return
   end
 
-  -- anti_conceal hides marks on the cursor line; our float is focused, so disable it.
+  -- Allow auto-attach / Api.render for our no-scrollbar filetype.
+  if ft == RESULT_FT_NO_SCROLLBAR then
+    pcall(function()
+      local state = require("render-markdown.state")
+      if type(state.file_types) == "table" and not vim.tbl_contains(state.file_types, RESULT_FT_NO_SCROLLBAR) then
+        table.insert(state.file_types, RESULT_FT_NO_SCROLLBAR)
+      end
+    end)
+  end
+
+  -- state.get() only merges custom config on cache miss.
+  pcall(function()
+    local state = require("render-markdown.state")
+    if type(state.cache) == "table" then
+      state.cache[bufnr] = nil
+    end
+  end)
+
+  -- render-markdown defaults: anti_conceal on + concealcursor='' while rendered,
+  -- which both expose raw MD on the cursor line. Override for our focused float.
   if type(rm.render) == "function" then
     pcall(rm.render, {
       buf = bufnr,
       win = winid,
       config = {
         anti_conceal = { enabled = false },
+        code = { width = "full" },
+        win_options = {
+          concealcursor = {
+            default = "",
+            rendered = "nvic",
+          },
+        },
       },
     })
   elseif type(rm.buf_enable) == "function" then
@@ -218,6 +261,22 @@ local function setup_markdown_buffer(bufnr, winid)
       vim.api.nvim_buf_call(bufnr, function()
         rm.buf_enable()
       end)
+    end)
+  end
+
+  -- Re-assert after render (rm applies win_options asynchronously via debounce).
+  if winid and vim.api.nvim_win_is_valid(winid) then
+    pcall(function()
+      vim.wo[winid].conceallevel = 2
+      vim.wo[winid].concealcursor = "nvic"
+    end)
+    vim.schedule(function()
+      if winid and vim.api.nvim_win_is_valid(winid) then
+        pcall(function()
+          vim.wo[winid].conceallevel = 2
+          vim.wo[winid].concealcursor = "nvic"
+        end)
+      end
     end)
   end
 
@@ -309,10 +368,10 @@ local function resolve_popup_placement(source, width, height)
   screen_end = screen_end or screen_start
   screen_col = screen_col or 1
 
-  -- Gap so border does not sit on the source line
+  -- gap: target clearance (in lines) between source and float outer edge.
   local gap = math.max(0, tonumber(ui.gap) or 1)
-  local space_below = vim.o.lines - screen_end - 2 - gap
-  local space_above = screen_start - 2 - gap
+  local space_below = vim.o.lines - screen_end - 1 - gap
+  local space_above = screen_start - 1 - gap
 
   local place_below
   if anchor == "below" then
@@ -334,13 +393,17 @@ local function resolve_popup_placement(source, width, height)
 
   -- Anchor below the selection END (avoids covering multi-line targets);
   -- anchor above the selection START.
+  -- nui/neovim accept fractional row for sub-line tweaks.
   local anchor_row, anchor_col, row
   if place_below then
     anchor_row, anchor_col = end_row, end_col
-    row = 1 + gap
+    -- Previous tuck (gap - 2), then shift down by 2 lines + one gap, then up 0.5.
+    row = (gap - 2) + (2 + gap) - 0.5
   else
     anchor_row, anchor_col = start_row, start_col
-    row = -(height + 1 + gap)
+    local above_fudge = 2
+    -- Shift up by half a line from the border-compensated position.
+    row = -(height + gap - above_fudge) - 1
   end
 
   return {
@@ -361,37 +424,45 @@ local function resolve_popup_placement(source, width, height)
 end
 
 ---@param title string
----@param source table|nil
----@param size { width: integer, height: integer }
+---@param opts {
+---  enter?: boolean,
+---  close_on_leave?: boolean,
+---  mount?: boolean,
+---  relative?: any,
+---  position?: any,
+---  size?: { width: integer, height: integer },
+---  padding?: table,
+---}|nil
 ---@return NuiPopup
----@return table place
-local function create_result_popup(title, source, size)
-  local opts = config.options.ui
-  local place = resolve_popup_placement(source, size.width, size.height)
+local function create_content_popup(title, opts)
+  opts = opts or {}
+  local ui_opts = config.options.ui
 
-  if opts.scrollbar == false then
+  if ui_opts.scrollbar == false then
     ensure_scrollbar_exclusions()
+  end
+
+  local border = {
+    style = ui_opts.border,
+    text = {
+      top = " " .. title .. " ",
+      top_align = ui_opts.title_align or "center",
+    },
+  }
+  if opts.padding then
+    border.padding = opts.padding
   end
 
   local popup_opts = {
     enter = opts.enter ~= false,
     focusable = true,
-    relative = place.relative,
-    position = place.position,
-    size = place.size,
-    border = {
-      style = opts.border,
-      text = {
-        top = " " .. title .. " ",
-        top_align = opts.title_align or "center",
-      },
-    },
+    border = border,
     win_options = {
-      wrap = opts.wrap ~= false,
-      linebreak = opts.linebreak ~= false,
+      wrap = ui_opts.wrap ~= false,
+      linebreak = ui_opts.linebreak ~= false,
       conceallevel = 2,
       concealcursor = "nvic",
-      winhighlight = opts.winhighlight or "Normal:Normal,FloatBorder:FloatBorder",
+      winhighlight = ui_opts.winhighlight or "Normal:Normal,FloatBorder:FloatBorder",
     },
     buf_options = {
       modifiable = true,
@@ -402,25 +473,27 @@ local function create_result_popup(title, source, size)
       filetype = result_filetype(),
     },
   }
-  if opts.zindex then
-    popup_opts.zindex = opts.zindex
+  if opts.relative then
+    popup_opts.relative = opts.relative
+  end
+  if opts.position then
+    popup_opts.position = opts.position
+  end
+  if opts.size then
+    popup_opts.size = opts.size
+  end
+  if ui_opts.zindex then
+    popup_opts.zindex = ui_opts.zindex
   end
 
   local popup = Popup(popup_opts)
 
-  popup:mount()
-
-  if opts.scrollbar == false then
-    clear_scrollbar(popup.bufnr)
+  if opts.mount ~= false then
+    popup:mount()
+    if ui_opts.scrollbar == false then
+      clear_scrollbar(popup.bufnr)
+    end
   end
-
-  popup:map("n", "q", function()
-    popup:unmount()
-  end, { noremap = true, silent = true })
-
-  popup:map("n", "<Esc>", function()
-    popup:unmount()
-  end, { noremap = true, silent = true })
 
   if opts.close_on_leave ~= false then
     popup:on(event.BufLeave, function()
@@ -428,7 +501,7 @@ local function create_result_popup(title, source, size)
     end)
   end
 
-  return popup, place
+  return popup
 end
 
 ---@param bufnr integer
@@ -439,6 +512,19 @@ local function set_lines(bufnr, lines)
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
   vim.bo[bufnr].modifiable = false
   vim.bo[bufnr].readonly = true
+end
+
+---@param winid integer|nil
+---@param bufnr integer
+local function scroll_to_bottom(winid, bufnr)
+  if not winid or not vim.api.nvim_win_is_valid(winid) then
+    return
+  end
+  if not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
+  local line_count = vim.api.nvim_buf_line_count(bufnr)
+  pcall(vim.api.nvim_win_set_cursor, winid, { line_count, 0 })
 end
 
 ---Build horizontally + vertically centered lines for a status message.
@@ -530,41 +616,412 @@ local function remember_result(title, text, fit, source)
   }
 end
 
----Show a result popup; opts.fit enables content-aware sizing (for translate).
----@param title string|nil
----@param initial_text string|nil
----@param opts {
----  source?: { win?: integer, row?: integer, col?: integer, end_row?: integer, end_col?: integer },
----  fit?: boolean,
----  content?: string,
----}|nil
----@return table
-function M.open_result(title, initial_text, opts)
-  title = title or "Explain it"
-  opts = opts or {}
-  local fit = opts.fit == true
-  local source = opts.source
-  local content = opts.content
+local function clear_active()
+  active_popup = nil
+  active_layout = nil
+  active_handle = nil
+end
 
-  if active_popup then
+---Close the active result UI if any.
+function M.close_active()
+  if active_layout then
+    pcall(function()
+      active_layout:unmount()
+    end)
+  elseif active_popup then
     pcall(function()
       active_popup:unmount()
     end)
-    active_popup = nil
+  end
+  clear_active()
+end
+
+---@return boolean
+function M.is_open()
+  if active_layout then
+    return true
+  end
+  return active_popup ~= nil and active_popup.winid ~= nil and vim.api.nvim_win_is_valid(active_popup.winid)
+end
+
+---@param popup NuiPopup
+---@param unmount_fn fun()
+local function map_close_keys(popup, unmount_fn)
+  popup:map("n", "q", unmount_fn, { noremap = true, silent = true })
+  popup:map("n", "<Esc>", unmount_fn, { noremap = true, silent = true })
+end
+
+---@param source table|nil
+---@return integer
+local function resolve_return_win(source)
+  if source and source.win and vim.api.nvim_win_is_valid(source.win) then
+    return source.win
+  end
+  return vim.api.nvim_get_current_win()
+end
+
+---@param win integer|nil
+local function restore_win(win)
+  vim.schedule(function()
+    if win and vim.api.nvim_win_is_valid(win) then
+      pcall(vim.api.nvim_set_current_win, win)
+    end
+  end)
+end
+
+---@param title string
+---@param source table|nil
+---@param size { width: integer, height: integer }
+---@param fit boolean
+---@param content string|nil
+---@param initial_text string|nil
+---@param on_submit fun(question: string)
+---@return table
+local function open_followable_result(title, source, size, fit, content, initial_text, on_submit)
+  local ui_opts = config.options.ui
+  local return_win = resolve_return_win(source)
+  -- Placement must use the full layout height (content + Ask), otherwise
+  -- "above" overlaps the source and "below" spacing looks inconsistent.
+  local desired_height = size.height + FOLLOW_INPUT_HEIGHT
+  local place = resolve_popup_placement(source, size.width, desired_height)
+  local layout_width = place.size.width
+  local layout_height = math.max(place.size.height, FOLLOW_INPUT_HEIGHT + 3)
+
+  local content_popup = create_content_popup(title, {
+    enter = ui_opts.enter ~= false,
+    close_on_leave = false,
+    mount = false,
+    -- left padding for the answer body
+    padding = { top = 0, right = 0, bottom = 0, left = 1 },
+  })
+
+  -- Ask always keeps its own scrollbar (ignore ui.scrollbar).
+  -- Extra right padding so the scrollbar does not cover the last character.
+  local prompt = Popup({
+    enter = false,
+    focusable = true,
+    border = {
+      style = ui_opts.border,
+      padding = { top = 0, right = 2, bottom = 0, left = 1 },
+      text = {
+        top = " Ask · C-s 发送 ",
+        top_align = "left",
+      },
+    },
+    win_options = {
+      wrap = true,
+      linebreak = true,
+      scrolloff = 0,
+      sidescrolloff = 0,
+      smoothscroll = false,
+      list = false,
+      number = false,
+      relativenumber = false,
+      signcolumn = "no",
+      foldcolumn = "0",
+      -- non-empty showbreak suppresses the smoothscroll "<<<" marker
+      showbreak = " ",
+      winhighlight = ui_opts.winhighlight or "Normal:Normal,FloatBorder:FloatBorder",
+    },
+    buf_options = {
+      modifiable = true,
+      buftype = "nofile",
+      bufhidden = "wipe",
+      swapfile = false,
+      filetype = "explain_it_ask",
+    },
+  })
+
+  local layout_opts = {
+    relative = place.relative,
+    position = place.position,
+    size = { width = layout_width, height = layout_height },
+  }
+  if ui_opts.zindex then
+    layout_opts.zindex = ui_opts.zindex
   end
 
-  local size = initial_size(fit, content or initial_text)
-  local popup = create_result_popup(title, source, size)
+  local layout = Layout(
+    layout_opts,
+    Layout.Box({
+      Layout.Box(content_popup, { grow = 1 }),
+      Layout.Box(prompt, { size = FOLLOW_INPUT_HEIGHT }),
+    }, { dir = "col" })
+  )
+
+  layout:mount()
+
+  local function harden_ask_win()
+    if not prompt.winid or not vim.api.nvim_win_is_valid(prompt.winid) then
+      return
+    end
+    local win = prompt.winid
+    pcall(vim.api.nvim_win_call, win, function()
+      vim.opt_local.wrap = true
+      vim.opt_local.linebreak = true
+      vim.opt_local.smoothscroll = false
+      vim.opt_local.list = false
+      vim.opt_local.number = false
+      vim.opt_local.relativenumber = false
+      vim.opt_local.signcolumn = "no"
+      vim.opt_local.foldcolumn = "0"
+      -- Non-empty showbreak disables the "<<<" first-line marker.
+      vim.opt_local.showbreak = " "
+      pcall(function()
+        vim.opt_local.fillchars:append({ lastline = " " })
+      end)
+    end)
+  end
+
+  harden_ask_win()
+  if vim.api.nvim_buf_is_valid(prompt.bufnr) then
+    vim.api.nvim_create_autocmd({ "BufWinEnter", "WinEnter" }, {
+      buffer = prompt.bufnr,
+      callback = function()
+        vim.schedule(harden_ask_win)
+      end,
+    })
+  end
+
+  if not scrollbar_enabled() then
+    clear_scrollbar(content_popup.bufnr)
+  end
+
+  active_popup = content_popup
+  active_layout = layout
+
+  local closed = false
+  local busy = false
+  local last_render_ms = 0
+
+  local function unmount_all()
+    if closed then
+      return
+    end
+    closed = true
+    pcall(function()
+      layout:unmount()
+    end)
+    if active_layout == layout then
+      clear_active()
+    end
+    restore_win(return_win)
+  end
+
+  content_popup:on(event.BufWipeout, function()
+    closed = true
+    if active_layout == layout then
+      clear_active()
+    end
+    restore_win(return_win)
+  end)
+
+  map_close_keys(content_popup, unmount_all)
+
+  local function focus_content()
+    if content_popup.winid and vim.api.nvim_win_is_valid(content_popup.winid) then
+      pcall(vim.api.nvim_set_current_win, content_popup.winid)
+    end
+  end
+
+  local function focus_input()
+    if closed or not prompt.winid or not vim.api.nvim_win_is_valid(prompt.winid) then
+      return
+    end
+    pcall(vim.api.nvim_set_current_win, prompt.winid)
+    vim.schedule(function()
+      if prompt.winid and vim.api.nvim_win_is_valid(prompt.winid) then
+        vim.api.nvim_win_call(prompt.winid, function()
+          vim.cmd("startinsert!")
+        end)
+      end
+    end)
+  end
+
+  local follow_key = config.options.keymaps and config.options.keymaps.follow_float
+  if follow_key and follow_key ~= false and follow_key ~= "" then
+    content_popup:map("n", follow_key, function()
+      focus_input()
+    end, { noremap = true, silent = true })
+  end
+
+  local function clear_prompt()
+    if not vim.api.nvim_buf_is_valid(prompt.bufnr) then
+      return
+    end
+    vim.bo[prompt.bufnr].modifiable = true
+    vim.api.nvim_buf_set_lines(prompt.bufnr, 0, -1, false, { "" })
+  end
+
+  local function read_prompt()
+    if not vim.api.nvim_buf_is_valid(prompt.bufnr) then
+      return ""
+    end
+    return vim.trim(table.concat(vim.api.nvim_buf_get_lines(prompt.bufnr, 0, -1, false), "\n"))
+  end
+
+  local function submit_prompt()
+    if busy then
+      return
+    end
+    local question = read_prompt()
+    clear_prompt()
+    vim.cmd("stopinsert")
+    focus_content()
+    if question == "" then
+      return
+    end
+    busy = true
+    on_submit(question)
+  end
+
+  clear_prompt()
+
+  -- Screen-line movement so Up/Down scroll wrapped / multi-line Ask text.
+  prompt:map("i", "<Up>", "<C-o>gk", { noremap = true, silent = true })
+  prompt:map("i", "<Down>", "<C-o>gj", { noremap = true, silent = true })
+  prompt:map("n", "<Up>", "gk", { noremap = true, silent = true })
+  prompt:map("n", "<Down>", "gj", { noremap = true, silent = true })
+  prompt:map("n", "k", "gk", { noremap = true, silent = true })
+  prompt:map("n", "j", "gj", { noremap = true, silent = true })
+
+  -- Insert <CR> = newline; C-s (and normal <CR>) = send
+  prompt:map("i", "<C-s>", function()
+    submit_prompt()
+  end, { noremap = true, silent = true })
+
+  prompt:map("n", "<C-s>", function()
+    submit_prompt()
+  end, { noremap = true, silent = true })
+
+  prompt:map("n", "<CR>", function()
+    submit_prompt()
+  end, { noremap = true, silent = true })
+
+  prompt:map("i", "<Esc>", function()
+    -- Leave insert on the Ask window first; :stopinsert is deferred and would
+    -- otherwise apply the Esc left-shift after we already switched to content.
+    local keys = vim.api.nvim_replace_termcodes("<C-\\><C-n>", true, false, true)
+    vim.api.nvim_feedkeys(keys, "n", false)
+    vim.schedule(function()
+      focus_content()
+    end)
+  end, { noremap = true, silent = true })
+
+  prompt:map("n", "<Esc>", function()
+    focus_content()
+  end, { noremap = true, silent = true })
+
+  prompt:map("n", "q", function()
+    unmount_all()
+  end, { noremap = true, silent = true })
+
+  local function apply_content(text, opts2)
+    if closed or not vim.api.nvim_buf_is_valid(content_popup.bufnr) then
+      return
+    end
+    opts2 = opts2 or {}
+
+    if opts2.status then
+      set_lines(content_popup.bufnr, centered_status_lines(text, content_popup.winid))
+      refresh_markdown(content_popup.bufnr, content_popup.winid)
+      return
+    end
+
+    remember_result(title, text or "", fit, source)
+    set_lines(content_popup.bufnr, vim.split(text or "", "\n", { plain = true }))
+    scroll_to_bottom(content_popup.winid, content_popup.bufnr)
+
+    if opts2.stream then
+      local now = (vim.uv or vim.loop).hrtime() / 1e6
+      if now - last_render_ms < 120 then
+        return
+      end
+      last_render_ms = now
+      setup_markdown_buffer(content_popup.bufnr, content_popup.winid)
+      return
+    end
+
+    refresh_markdown(content_popup.bufnr, content_popup.winid)
+  end
+
+  if content then
+    apply_content(content, {})
+  else
+    set_lines(
+      content_popup.bufnr,
+      centered_status_lines(initial_text or M.status_text("Explaining"), content_popup.winid)
+    )
+    refresh_markdown(content_popup.bufnr, content_popup.winid)
+  end
+
+  local handle = {
+    popup = content_popup,
+    layout = layout,
+    update = function(text, opts2)
+      apply_content(text, opts2)
+    end,
+    set_busy = function(value)
+      busy = value == true
+    end,
+    focus_input = focus_input,
+    focus_content = focus_content,
+    close = unmount_all,
+  }
+  active_handle = handle
+  return handle
+end
+
+---@param title string
+---@param source table|nil
+---@param size { width: integer, height: integer }
+---@param fit boolean
+---@param content string|nil
+---@param initial_text string|nil
+---@return table
+local function open_simple_result(title, source, size, fit, content, initial_text)
+  local ui_opts = config.options.ui
+  local return_win = resolve_return_win(source)
+  local place = resolve_popup_placement(source, size.width, size.height)
+
+  local popup = create_content_popup(title, {
+    enter = ui_opts.enter ~= false,
+    close_on_leave = ui_opts.close_on_leave ~= false,
+    mount = true,
+    relative = place.relative,
+    position = place.position,
+    size = place.size,
+  })
   active_popup = popup
+  active_layout = nil
 
   local closed = false
   local last_render_ms = 0
   local last_size = { width = size.width, height = size.height }
 
-  popup:on(event.BufWipeout, function()
+  local function unmount_popup()
+    if closed then
+      return
+    end
     closed = true
+    pcall(function()
+      popup:unmount()
+    end)
     if active_popup == popup then
-      active_popup = nil
+      clear_active()
+    end
+    restore_win(return_win)
+  end
+
+  map_close_keys(popup, unmount_popup)
+
+  popup:on(event.BufWipeout, function()
+    if not closed then
+      closed = true
+      if active_popup == popup then
+        clear_active()
+      end
+      restore_win(return_win)
     end
   end)
 
@@ -583,12 +1040,12 @@ function M.open_result(title, initial_text, opts)
     end
     last_size = { width = width, height = height }
 
-    local place = resolve_popup_placement(source, width, height)
+    local new_place = resolve_popup_placement(source, width, height)
     pcall(function()
       popup:update_layout({
-        relative = place.relative,
-        position = place.position,
-        size = place.size,
+        relative = new_place.relative,
+        position = new_place.position,
+        size = new_place.size,
       })
     end)
   end
@@ -602,10 +1059,8 @@ function M.open_result(title, initial_text, opts)
   end
   refresh_markdown(popup.bufnr, popup.winid)
 
-  return {
+  local handle = {
     popup = popup,
-    ---@param text string
-    ---@param opts2 { stream?: boolean, status?: boolean }|nil
     update = function(text, opts2)
       if closed or not vim.api.nvim_buf_is_valid(popup.bufnr) then
         return
@@ -634,21 +1089,48 @@ function M.open_result(title, initial_text, opts)
 
       refresh_markdown(popup.bufnr, popup.winid)
     end,
-    close = function()
-      if not closed then
-        pcall(function()
-          popup:unmount()
-        end)
-      end
-    end,
+    close = unmount_popup,
   }
+  active_handle = handle
+  return handle
+end
+
+---Show a result popup; opts.fit enables content-aware sizing (for translate).
+---@param title string|nil
+---@param initial_text string|nil
+---@param opts {
+---  source?: { win?: integer, row?: integer, col?: integer, end_row?: integer, end_col?: integer },
+---  fit?: boolean,
+---  content?: string,
+---  followable?: boolean,
+---  on_submit?: fun(question: string),
+---}|nil
+---@return table
+function M.open_result(title, initial_text, opts)
+  title = title or "Explain it"
+  opts = opts or {}
+  local fit = opts.fit == true
+  local source = opts.source
+  local content = opts.content
+  local followable = opts.followable == true and type(opts.on_submit) == "function"
+
+  M.close_active()
+
+  local size = initial_size(fit, content or initial_text)
+
+  if followable then
+    return open_followable_result(title, source, size, fit, content, initial_text, opts.on_submit)
+  end
+  return open_simple_result(title, source, size, fit, content, initial_text)
 end
 
 ---Reopen the last result popup after it was closed with q / Esc.
 ---@return boolean opened
 function M.reopen_last()
-  if active_popup and active_popup.winid and vim.api.nvim_win_is_valid(active_popup.winid) then
-    pcall(vim.api.nvim_set_current_win, active_popup.winid)
+  if M.is_open() then
+    if active_popup and active_popup.winid and vim.api.nvim_win_is_valid(active_popup.winid) then
+      pcall(vim.api.nvim_set_current_win, active_popup.winid)
+    end
     return true
   end
 
@@ -663,53 +1145,6 @@ function M.reopen_last()
     content = last_result.text,
   })
   return true
-end
-
----@param opts { title?: string, default_value?: string, on_submit: fun(value: string), on_close?: fun() }
-function M.ask_input(opts)
-  opts = opts or {}
-  local title = opts.title or "Ask"
-  local ui = config.options.ui
-  local input = Input({
-    relative = "editor",
-    position = "50%",
-    size = {
-      width = resolve_size(0.6, vim.o.columns, 20),
-    },
-    border = {
-      style = ui.border,
-      text = {
-        top = " " .. title .. " ",
-        top_align = ui.title_align or "center",
-      },
-    },
-    win_options = {
-      winhighlight = ui.winhighlight or "Normal:Normal,FloatBorder:FloatBorder",
-    },
-  }, {
-    prompt = "> ",
-    default_value = opts.default_value or "",
-    on_close = function()
-      if opts.on_close then
-        opts.on_close()
-      end
-    end,
-    on_submit = function(value)
-      if opts.on_submit then
-        opts.on_submit(value)
-      end
-    end,
-  })
-
-  input:mount()
-
-  input:map("n", "<Esc>", function()
-    input:unmount()
-  end, { noremap = true })
-
-  input:map("i", "<Esc>", function()
-    input:unmount()
-  end, { noremap = true })
 end
 
 return M

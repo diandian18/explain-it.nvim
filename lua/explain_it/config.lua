@@ -41,6 +41,7 @@ local M = {}
 ---@field translate string|false
 ---@field ask string|false
 ---@field reopen string|false
+---@field follow_float string|false key inside result float to focus Ask
 
 ---@class ExplainItConfig
 ---@field api ExplainItApiConfig
@@ -95,6 +96,7 @@ M.defaults = {
     translate = "<leader>et",
     ask = "<leader>ea",
     reopen = "<leader>er",
+    follow_float = "i",
   },
   context_lines = 15,
   definition_context_lines = 20,
