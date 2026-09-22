@@ -2,6 +2,8 @@
 
 Neovim 插件：借助 OpenAI 兼容大模型 API，对光标处单词或可视选区做**中文解释**、**翻译**与**自由提问**。结果以 [nui.nvim](https://github.com/MunifTanjim/nui.nvim) 浮窗展示。
 
+![explain-it.nvim screenshot](assets/explain-it.png)
+
 ## 功能
 
 | 功能 | 默认快捷键 | 命令 | 说明 |
