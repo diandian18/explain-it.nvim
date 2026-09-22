@@ -160,6 +160,10 @@ function M.translate(from_visual)
   })
 end
 
+function M.reopen()
+  ui.reopen_last()
+end
+
 ---@param from_visual boolean|nil
 function M.ask(from_visual)
   local target = context.get_target_text(from_visual)
@@ -236,6 +240,10 @@ function M.setup_commands()
   vim.api.nvim_create_user_command("ExplainAsk", function(opts)
     M.ask(opts.range ~= nil and opts.range > 0)
   end, { desc = "Ask LLM about word/selection", range = true })
+
+  vim.api.nvim_create_user_command("ExplainLast", function()
+    M.reopen()
+  end, { desc = "Reopen last explain-it result popup" })
 end
 
 function M.setup_keymaps()
@@ -269,6 +277,13 @@ function M.setup_keymaps()
   end, function()
     M.ask(true)
   end, "Explain: ask")
+
+  local reopen = maps.reopen
+  if reopen and reopen ~= false and reopen ~= "" then
+    vim.keymap.set("n", reopen, function()
+      M.reopen()
+    end, { desc = "Explain: reopen last result", silent = true })
+  end
 end
 
 return M

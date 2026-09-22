@@ -9,6 +9,14 @@ local M = {}
 ---@type NuiPopup|nil
 local active_popup = nil
 
+---@type {
+---  title: string,
+---  text: string,
+---  fit: boolean,
+---  source?: { win?: integer, row?: integer, col?: integer, end_row?: integer, end_col?: integer },
+---}|nil
+local last_result = nil
+
 local INLINE_NS = vim.api.nvim_create_namespace("explain_it_inline_md")
 
 ---Dedicated filetype so scrollbar plugins can exclude the float without
@@ -505,12 +513,30 @@ local function initial_size(fit, text)
   return { width = w, height = h }
 end
 
+---Remember the latest non-status result so it can be reopened after close.
+---@param title string
+---@param text string
+---@param fit boolean
+---@param source table|nil
+local function remember_result(title, text, fit, source)
+  if type(text) ~= "string" or vim.trim(text) == "" then
+    return
+  end
+  last_result = {
+    title = title,
+    text = text,
+    fit = fit == true,
+    source = source,
+  }
+end
+
 ---Show a result popup; opts.fit enables content-aware sizing (for translate).
 ---@param title string|nil
 ---@param initial_text string|nil
 ---@param opts {
 ---  source?: { win?: integer, row?: integer, col?: integer, end_row?: integer, end_col?: integer },
 ---  fit?: boolean,
+---  content?: string,
 ---}|nil
 ---@return table
 function M.open_result(title, initial_text, opts)
@@ -518,6 +544,7 @@ function M.open_result(title, initial_text, opts)
   opts = opts or {}
   local fit = opts.fit == true
   local source = opts.source
+  local content = opts.content
 
   if active_popup then
     pcall(function()
@@ -526,12 +553,9 @@ function M.open_result(title, initial_text, opts)
     active_popup = nil
   end
 
-  local size = initial_size(fit, initial_text)
+  local size = initial_size(fit, content or initial_text)
   local popup = create_result_popup(title, source, size)
   active_popup = popup
-
-  set_lines(popup.bufnr, centered_status_lines(initial_text or M.status_text("Explaining"), popup.winid))
-  refresh_markdown(popup.bufnr, popup.winid)
 
   local closed = false
   local last_render_ms = 0
@@ -569,6 +593,15 @@ function M.open_result(title, initial_text, opts)
     end)
   end
 
+  if content then
+    set_lines(popup.bufnr, vim.split(content, "\n", { plain = true }))
+    apply_fit_size(content)
+    remember_result(title, content, fit, source)
+  else
+    set_lines(popup.bufnr, centered_status_lines(initial_text or M.status_text("Explaining"), popup.winid))
+  end
+  refresh_markdown(popup.bufnr, popup.winid)
+
   return {
     popup = popup,
     ---@param text string
@@ -585,6 +618,7 @@ function M.open_result(title, initial_text, opts)
         return
       end
 
+      remember_result(title, text or "", fit, source)
       set_lines(popup.bufnr, vim.split(text or "", "\n", { plain = true }))
       apply_fit_size(text)
 
@@ -608,6 +642,27 @@ function M.open_result(title, initial_text, opts)
       end
     end,
   }
+end
+
+---Reopen the last result popup after it was closed with q / Esc.
+---@return boolean opened
+function M.reopen_last()
+  if active_popup and active_popup.winid and vim.api.nvim_win_is_valid(active_popup.winid) then
+    pcall(vim.api.nvim_set_current_win, active_popup.winid)
+    return true
+  end
+
+  if not last_result then
+    vim.notify("[explain-it.nvim] 没有可重新打开的上次结果。", vim.log.levels.WARN)
+    return false
+  end
+
+  M.open_result(last_result.title, nil, {
+    fit = last_result.fit,
+    source = last_result.source,
+    content = last_result.text,
+  })
+  return true
 end
 
 ---@param opts { title?: string, default_value?: string, on_submit: fun(value: string), on_close?: fun() }

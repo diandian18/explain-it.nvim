@@ -40,6 +40,7 @@ local M = {}
 ---@field explain string|false
 ---@field translate string|false
 ---@field ask string|false
+---@field reopen string|false
 
 ---@class ExplainItConfig
 ---@field api ExplainItApiConfig
@@ -93,6 +94,7 @@ M.defaults = {
     explain = "<leader>ee",
     translate = "<leader>et",
     ask = "<leader>ea",
+    reopen = "<leader>er",
   },
   context_lines = 15,
   definition_context_lines = 20,

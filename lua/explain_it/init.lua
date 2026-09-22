@@ -22,4 +22,8 @@ M.ask = function(...)
   return commands.ask(...)
 end
 
+M.reopen = function(...)
+  return commands.reopen(...)
+end
+
 return M

@@ -11,6 +11,7 @@ Neovim 插件：借助 OpenAI 兼容大模型 API，对光标处单词或可视�
 | 解释 | `<leader>ee` | `:Explain` | 结合上下文 / LSP / 定义处注释，中文说明变量或选区 |
 | 翻译 | `<leader>et` | `:ExplainTranslate` | 翻译光标单词或选中文本 |
 | 提问 | `<leader>ea` | `:ExplainAsk` | 弹出输入框提问，结合目标文本与上下文作答 |
+| 重开 | `<leader>er` | `:ExplainLast` | 重新打开上次关闭的结果浮窗 |
 
 普通模式与可视模式均可用；有选区时优先使用选区。
 
@@ -85,6 +86,7 @@ require("explain_it").setup({
     explain = "<leader>ee",
     translate = "<leader>et",
     ask = "<leader>ea",
+    reopen = "<leader>er", -- 重新打开上次结果
     -- 设为 false 可禁用某一快捷键
   },
 })
@@ -112,6 +114,7 @@ require("explain_it").setup({
 ## 快捷键与浮窗
 
 - 结果浮窗：`q` / `<Esc>` 关闭
+- 关闭后可用 `<leader>er` 或 `:ExplainLast` 重新打开上次内容（若浮窗仍在则聚焦）
 - 提问输入框：回车提交，`<Esc>` 取消
 
 ## License
