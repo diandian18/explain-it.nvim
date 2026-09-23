@@ -379,7 +379,7 @@ local function resolve_popup_placement(source, width, height)
   elseif anchor == "above" then
     place_below = false
   else
-    place_below = space_below >= math.min(height, 8) or space_below >= space_above
+    place_below = space_below >= space_above
   end
 
   local avail = place_below and space_below or space_above
