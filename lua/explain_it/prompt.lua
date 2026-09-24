@@ -213,16 +213,19 @@ end
 ---@return { role: string, content: string }[]
 function M.translate_messages(text)
   local lang = config.options.translate.target_lang or "zh-CN"
+  -- Snake-case names are often prose-like identifiers; translate their words
+  -- instead of asking the model to preserve them as code identifiers.
+  local translation_text = (text or ""):gsub("_", " ")
   local system = table.concat({
     "你是专业翻译。将用户给出的文本翻译成目标语言。",
     "目标语言: " .. lang,
     "只输出译文本身，不要复述原文，不要加「原文:」等前缀或标题，不要额外解释。",
-    "保留专有名词、标识符、代码片段不乱译。",
+    "将输入中的下划线视为空格；snake_case 词组应按普通词组翻译，不要原样保留。仅保留确实需要保留的专有名词和代码片段。",
   }, "\n")
 
   return {
     { role = "system", content = system },
-    { role = "user", content = text },
+    { role = "user", content = translation_text },
   }
 end
 
