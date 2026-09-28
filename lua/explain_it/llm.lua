@@ -85,6 +85,7 @@ function M.chat(messages, handlers)
     model = opts.model,
     messages = messages,
     temperature = opts.temperature,
+    reasoning_effort = opts.reasoning_effort,
     stream = true,
   })
 

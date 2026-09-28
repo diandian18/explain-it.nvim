@@ -52,6 +52,7 @@ require("explain_it").setup({
     model = "gpt-4o-mini",
     timeout_ms = 30000,
     temperature = 0.3,
+    -- reasoning_effort = "low", -- 可选；推理模型支持 none / low / medium / high / xhigh / max
   },
   translate = {
     target_lang = "zh-CN",
