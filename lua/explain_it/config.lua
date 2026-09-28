@@ -6,6 +6,7 @@ local M = {}
 ---@field model string
 ---@field timeout_ms integer
 ---@field temperature number|nil
+---@field reasoning_effort string|nil
 
 ---@class ExplainItTranslateConfig
 ---@field target_lang string
